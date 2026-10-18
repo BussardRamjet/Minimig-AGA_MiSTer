@@ -768,8 +768,10 @@ wire         bob_deint;
 		.himax    (0),
 		.vimin    (0),
 		.vimax    (0),
-		.vicrop_t (VCROP_T),
-		.vicrop_b (VCROP_B),
+		.vicrop_t (pal60 ? p60_crop_t : VCROP_T),
+		.vicrop_b (pal60 ? p60_crop_b : VCROP_B),
+		.i_hdmax  (ascal_hdmax),
+		.i_vdmax  (ascal_vdmax),
 
 		.o_clk    (clk_hdmi),
 		.o_ce     (scaler_out),
@@ -786,19 +788,19 @@ wire         bob_deint;
 		.hsstart  (WIDTH + HFP),
 		.hsend    (WIDTH + HFP + HS[11:0]),
 		.hdisp    (WIDTH),
-		.hmin     (hmin),
-		.hmax     (hmax),
+		.hmin     (pal60 ? p60_hmin : hmin),
+		.hmax     (pal60 ? p60_hmax : hmax),
 		.vtotal   (HEIGHT + VFP + VBP + VS[11:0]),
 		.vsstart  (HEIGHT + VFP),
 		.vsend    (HEIGHT + VFP + VS[11:0]),
 		.vdisp    (HEIGHT),
-		.vmin     (vmin),
-		.vmax     (vmax),
+		.vmin     (pal60 ? p60_vmin : vmin),
+		.vmax     (pal60 ? p60_vmax : vmax),
 		.vrr      (vrr_mode),
 		.vrrmax   (HEIGHT + VBP + VS[11:0] + 12'd1),
 		.swblack  (hdmi_blackout),
 
-		.mode     ({~lowlat,LFB_EN ? LFB_FLT : |scaler_flt,2'b00}),
+		.mode     ({~lowlat,LFB_EN ? LFB_FLT : (|scaler_flt & ~pal60),2'b00}),
 		.poly_clk (clk_sys),
 		.poly_a   (coef_addr),
 		.poly_dw  (coef_data),
@@ -1002,6 +1004,53 @@ always @(posedge clk_vid) begin
 	hmax <= hmaxi;
 	vmin <= vmini;
 	vmax <= vmaxi;
+end
+
+// PAL60 experiment: with Y/C on the scaler output, the core forces the layout
+// itself so it works with a stock Main_MiSTer. Input lines are shown 1:1
+// (cropped or centred to HEIGHT), width uses the largest integer factor that
+// fits WIDTH, nearest neighbour. Main's window/crop/filter are ignored.
+wire [11:0] ascal_hdmax, ascal_vdmax;
+`ifdef MISTER_PAL60_FORCE
+	wire pal60 = yc_en & vga_scaler & ~FB_EN;
+`else
+	wire pal60 = 0;
+`endif
+
+reg [11:0] p60_hmin, p60_hmax, p60_vmin, p60_vmax, p60_crop_t, p60_crop_b;
+always @(posedge clk_vid) begin
+	reg [11:0] iw1, iw, ih1, ih, crop;
+	reg [13:0] w2, w3, w4, ow;
+
+	// i_clk domain, changes only on mode switches. 0 = not measured yet.
+	iw1 <= ascal_hdmax + 1'd1; iw <= iw1 ? iw1 : WIDTH;
+	ih1 <= ascal_vdmax + 1'd1; ih <= ih1 ? ih1 : HEIGHT;
+
+	w2 <= {iw,1'b0};
+	w3 <= {iw,1'b0} + iw;
+	w4 <= {iw,2'b00};
+
+	if     (w4 <= WIDTH) ow <= w4;
+	else if(w3 <= WIDTH) ow <= w3;
+	else if(w2 <= WIDTH) ow <= w2;
+	else if(iw <= WIDTH) ow <= iw;
+	else                 ow <= WIDTH;
+
+	p60_hmin <= (WIDTH - ow[11:0]) >> 1;
+	p60_hmax <= ((WIDTH - ow[11:0]) >> 1) + ow[11:0] - 1'd1;
+
+	if(ih > HEIGHT) begin
+		crop       <= ih - HEIGHT;
+		p60_vmin   <= 0;
+		p60_vmax   <= HEIGHT - 1'd1;
+	end
+	else begin
+		crop       <= 0;
+		p60_vmin   <= (HEIGHT - ih) >> 1;
+		p60_vmax   <= ((HEIGHT - ih) >> 1) + ih - 1'd1;
+	end
+	p60_crop_t <= crop >> 1;
+	p60_crop_b <= crop - (crop >> 1);
 end
 
 `ifndef MISTER_DEBUG_NOHDMI
@@ -1507,10 +1556,11 @@ reg  [39:0] PhaseInc;
 			yc_out yc_scaler_out
 			(
 				.clk(clk_hdmi),
-				.PAL_EN(pal_en),
+				// PAL60: NTSC at 28.636MHz = 8 x fsc; burst 3.7..12.7 cycles (Main's formula)
+				.PAL_EN(pal60 ? 1'b0 : pal_en),
 				.CVBS(cvbs),
-				.PHASE_INC(PhaseInc),
-				.COLORBURST_RANGE(ColorBurst_Range),
+				.PHASE_INC(pal60 ? 40'd1 << 37 : PhaseInc),
+				.COLORBURST_RANGE(pal60 ? {7'd29, 10'd101} : ColorBurst_Range),
 				.hsync(hdmi_hs_osd),
 				.vsync(hdmi_vs_osd),
 				.csync(hdmi_cs_osd),
